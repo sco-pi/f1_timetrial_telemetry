@@ -1,4 +1,6 @@
 import json
+import dill
+import os
 
 from f1_22_telemetry.listener import TelemetryListener
 from f1_22_telemetry.appendices import TRACK_IDS
@@ -11,18 +13,29 @@ import queue
 import time
 import math
 
+# Save telemetry data to a queue for the UI to pull from
 telemetry_queue = queue.Queue()
-ui_update_interval = 50 # ms
-telelmetry_update_interval = 500 # ms
+
+# Set update intervals, default telemetry is 20Hz == 50ms
+ui_update_interval = 25 # ms
+telelmetry_update_interval = 250 # ms
 max_data_points = 100
-map_scale_factor = 0.25
+map_scale_factor = 0.15 # Canada
+#map_scale_factor = 0.25 # Austria
 
 # Enable bits of the UI:
 enable_throttle_graph = True
 enable_brake_graph = True
 enable_speed_graph = True
 enable_map = True
-    
+
+# Enable saving of Telemetry Data to Disk
+enable_save_telemetry = True
+
+# Telemetry Server Config
+listen_ip = "0.0.0.0"
+listen_port = 20777
+
 def format_lap_time(lap_time):
     msec=lap_time%1000
     seconds=math.floor((lap_time/1000)%60)
@@ -129,7 +142,7 @@ class App(tk.Tk):
         self.after(ui_update_interval, self.update_ui_telemetry)
 
         #tk.Button(self, text="Run unthreaded", command=self.startF1Server_unthreaded).pack()
-        tk.Button(self, text="Run threaded", command=self.startF1Server_threaded).pack()
+        tk.Button(self, text="Start Server", command=self.startF1Server_threaded).pack()
 
         self.tk_thread_status = tk.StringVar()
         self.tk_thread_status.set("Not Listening")
@@ -238,8 +251,8 @@ class App(tk.Tk):
 
 def _get_listener():
     try:
-        print('Starting listener on 0.0.0.0:20777')
-        return TelemetryListener(host="0.0.0.0")
+        print(f'Starting listener on "{listen_ip}:{listen_port}"')
+        return TelemetryListener(host=listen_ip, port=listen_port)
     except OSError as exception:
         print(f'Unable to setup connection: {exception.args[1]}')
         print('Failed to open connector, stopping.')
@@ -253,7 +266,7 @@ def startF1Server():
     throttle = 0.0
     brake = 0.0
     drs = 0
-    last_laps = [{'time': 0, 'valid': True},{'time': 0, 'valid': True},{'time': 0, 'valid': True},{'time': 0, 'valid': True},{'time': 0, 'valid': True}]
+    last_laps = [{'time': 0, 'valid': True},{'time': 0, 'valid': True},{'time': 0, 'valid': True},{'time': 0, 'valid': True},{'time': 0, 'valid': True}] #TODO: find a cleaner way to init this
     loc_x = 0.0
     loc_y = 0.0
     loc_z = 0.0
@@ -262,6 +275,8 @@ def startF1Server():
     track_id = -1
     game_paused = 1
     lap_number = 0
+
+    packets = []
 
     while True:
         packet = listener.get()
@@ -284,6 +299,10 @@ def startF1Server():
         #if (packet.header.packet_id == 2): #PacketLapData
         #    session_time = packet.header.session_time
         #    lap_number = packet.current_lap_num
+        
+        #if (packet.header.packet_id == 3): #PacketEventData
+        #    print("Event Data:")
+        #    print(json.dumps(packet.to_dict(), indent=4, sort_keys=True))
 
         if (packet.header.packet_id == 6): #PacketCarTelemetryData
             session_time = packet.header.session_time
@@ -320,13 +339,30 @@ def startF1Server():
             last_laps[3]['valid'] = bool(packet.lap_history_data[num_laps-3].lap_valid_bit_flags & 0b0001)
             last_laps[4]['time'] = packet.lap_history_data[num_laps-2].lap_time_in_ms
             last_laps[4]['valid'] = bool(packet.lap_history_data[num_laps-2].lap_valid_bit_flags & 0b0001)
-            print(f"{packet.lap_history_data[num_laps-2].lap_valid_bit_flags:>08b}, {packet.lap_history_data[num_laps-3].lap_valid_bit_flags:>08b}, {packet.lap_history_data[num_laps-4].lap_valid_bit_flags:>08b}, {packet.lap_history_data[num_laps-5].lap_valid_bit_flags:>08b}, {packet.lap_history_data[num_laps-6].lap_valid_bit_flags:>08b}")
-            print(f"{last_laps[0]['valid']!s:^5}, {last_laps[1]['valid']!s:^5}, {last_laps[2]['valid']!s:^5}, {last_laps[3]['valid']!s:^5}, {last_laps[4]['valid']!s:^5}")
+            #print(f"{packet.lap_history_data[num_laps-2].lap_valid_bit_flags:>08b}, {packet.lap_history_data[num_laps-3].lap_valid_bit_flags:>08b}, {packet.lap_history_data[num_laps-4].lap_valid_bit_flags:>08b}, {packet.lap_history_data[num_laps-5].lap_valid_bit_flags:>08b}, {packet.lap_history_data[num_laps-6].lap_valid_bit_flags:>08b}")
+            #print(f"{last_laps[0]['valid']!s:^5}, {last_laps[1]['valid']!s:^5}, {last_laps[2]['valid']!s:^5}, {last_laps[3]['valid']!s:^5}, {last_laps[4]['valid']!s:^5}")
+
+            # Dump stored session data to disk for later review
+            # TODO: this should be uploaded to an API for storage/processing
+            if (enable_save_telemetry and lap_number < packet.num_laps and lap_number != 0):
+                file_name = f'{packet.header.session_uid}/lap{lap_number}.pkl'
+                # Create Session Dir if not exists
+                os.makedirs(str(packet.header.session_uid), exist_ok=True)
+                with open(file_name, 'wb') as file:
+                    dill.dump(packets, file)
+                    print(f'Object successfully saved to "{file_name}"')
+                packets = []
+
             lap_number = packet.num_laps
             #print(f"Lap {lap_number}")
         
         #print(f"{speed}KPH, {last_laps[0]/1000}s, {last_laps[1]/1000}s, {last_laps[2]/1000}s, {last_laps[3]/1000}s, {last_laps[4]/1000}s, {throttle*100:0.0f}%, {brake*100:0.0f}%, {drs}, {loc_x:0.2f}x, {loc_y:0.2f}y")
 
+        # Store Session Data so that we can dump it to disk and review later
+        if enable_save_telemetry:
+            packets.append(packet)
+
+        # To save overwhelming the UI while waiting for it to render, only add a message to the queue every "telelmetry_update_interval" miliseconds
         if last_ui_update < time.time() - (telelmetry_update_interval / 1000):
             last_ui_update = time.time()
             update = {
