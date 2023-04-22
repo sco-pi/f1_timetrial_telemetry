@@ -5,6 +5,8 @@ import os
 from f1_22_telemetry.listener import TelemetryListener
 from f1_22_telemetry.appendices import TRACK_IDS
 
+from data import TRACK_SETTINGS
+
 import tkinter as tk
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -18,10 +20,8 @@ telemetry_queue = queue.Queue()
 
 # Set update intervals, default telemetry is 20Hz == 50ms
 ui_update_interval = 25 # ms
-telelmetry_update_interval = 250 # ms
+telemetry_update_interval = 250 # ms
 max_data_points = 100
-map_scale_factor = 0.15 # Canada
-#map_scale_factor = 0.25 # Austria
 
 # Enable bits of the UI:
 enable_throttle_graph = True
@@ -31,6 +31,9 @@ enable_map = True
 
 # Enable saving of Telemetry Data to Disk
 enable_save_telemetry = True
+
+map_width = 400
+map_height = 400
 
 # Telemetry Server Config
 listen_ip = "0.0.0.0"
@@ -98,7 +101,7 @@ class App(tk.Tk):
 
         # Track Map
         if enable_map:
-            self.map = tk.Canvas(self,width=400, height=400)
+            self.map = tk.Canvas(self,width=map_width, height=map_height)
             self.map.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
         tk.Label(text="F1 22 - Test").pack()
@@ -188,7 +191,7 @@ class App(tk.Tk):
             self.tk_throttle.set(f"Throttle: {message['throttle']*100:0.0f}%")
             self.tk_brake.set(f"Brake: {message['brake']*100:0.0f}%")
             if message['track_id'] != -1:
-                self.tk_track.set(f"Track: {TRACK_IDS[message['track_id']]}")
+                self.tk_track.set(f"Track: {TRACK_SETTINGS[message['track_id']]['name']}")
             else:
                 self.tk_track.set(f"Track: Unknown")
 
@@ -233,16 +236,18 @@ class App(tk.Tk):
                 self.brake_canvas.draw_idle()  # redraw plot
 
             # Update Track Map
-            if enable_map:
-                mapped_x = message["loc_x"] * map_scale_factor + 200
-                mapped_y = message["loc_y"] * map_scale_factor + 200
-                mapped_z = message["loc_z"] * map_scale_factor + 200
+            if enable_map and (message["loc_x"] != 0 and message["loc_z"] != 0):
+                mapped_x = message["loc_x"] * TRACK_SETTINGS[message['track_id']]['mapScale'] + (map_width/2)
+                #mapped_y = message["loc_y"] * TRACK_SETTINGS[message['track_id']]['mapScale'] + 200
+                mapped_z = message["loc_z"] * TRACK_SETTINGS[message['track_id']]['mapScale'] + (map_width/2)
                 #self.map.create_oval(mapped_x-5,mapped_z-5,mapped_x+5,mapped_z+5,fill="blue", outline="blue")
                 pointer_size = 20
-                break_colur = f'#{int(message["brake"]*100):02x}{0:02x}{0:02x}'
+                brake_colur = f'#{int(message["brake"]*100):02x}{0:02x}{0:02x}'
                 throttle_colur = f'#{0:02x}{0:02x}{int(message["throttle"]*100):02x}'
-                self.map.create_arc(mapped_x-pointer_size,mapped_z-pointer_size,mapped_x+pointer_size,mapped_z+pointer_size,fill=break_colur, outline=throttle_colur, start=(math.degrees(message["yaw"])-15)+90, extent=45)
+                # Create an arc as an Arrow pointing int he current direction of the car
+                self.map.create_arc(mapped_x-pointer_size,mapped_z-pointer_size,mapped_x+pointer_size,mapped_z+pointer_size,fill=brake_colur, outline=throttle_colur, start=(math.degrees(message["yaw"])-15)+90, extent=45)
                 #print(f'Orig: { message["loc_x"] }x,{ message["loc_y"] }y,{ message["loc_z"] }z, Mapped: {mapped_x}x,{mapped_y}y,{mapped_z}z,')
+                #print(f'Orig: { message["loc_x"] }x,{ message["loc_z"] }z, Mapped: {mapped_x}x,{mapped_z}z,')
 
 
             #print(f"UI Update took {time.time() - ui_update_start}")
@@ -267,6 +272,7 @@ def startF1Server():
     brake = 0.0
     drs = 0
     last_laps = [{'time': 0, 'valid': True},{'time': 0, 'valid': True},{'time': 0, 'valid': True},{'time': 0, 'valid': True},{'time': 0, 'valid': True}] #TODO: find a cleaner way to init this
+    lap_time = 0
     loc_x = 0.0
     loc_y = 0.0
     loc_z = 0.0
@@ -287,6 +293,7 @@ def startF1Server():
             loc_y = packet.car_motion_data[0].world_position_y
             loc_z = packet.car_motion_data[0].world_position_z
             yaw = packet.car_motion_data[0].yaw
+            #print(f'x:{loc_x}, z:{loc_z}')
         
         if (packet.header.packet_id == 1): #PacketSessionData
             session_time = packet.header.session_time
@@ -296,9 +303,11 @@ def startF1Server():
             track_id = packet.track_id
             game_paused = packet.game_paused
         
-        #if (packet.header.packet_id == 2): #PacketLapData
-        #    session_time = packet.header.session_time
-        #    lap_number = packet.current_lap_num
+        if (packet.header.packet_id == 2): #PacketLapData
+            #print(json.dumps(packet.to_dict(), indent=4, sort_keys=True))
+            session_time = packet.header.session_time
+            #lap_number = packet.lap_data[1].current_lap_num
+            lap_time = packet.lap_data[1].current_lap_time_in_ms
         
         #if (packet.header.packet_id == 3): #PacketEventData
         #    print("Event Data:")
@@ -344,13 +353,13 @@ def startF1Server():
 
             # Dump stored session data to disk for later review
             # TODO: this should be uploaded to an API for storage/processing
-            if (enable_save_telemetry and lap_number < packet.num_laps and lap_number != 0):
+            if (enable_save_telemetry and lap_number < packet.num_laps and lap_number != 0 and lap_time < (TRACK_SETTINGS[track_id]['maxRecordingTime'])):
                 file_name = f'{packet.header.session_uid}/lap{lap_number}.pkl'
                 # Create Session Dir if not exists
                 os.makedirs(str(packet.header.session_uid), exist_ok=True)
                 with open(file_name, 'wb') as file:
                     dill.dump(packets, file)
-                    print(f'Object successfully saved to "{file_name}"')
+                    print(f'Lap data successfully saved to "{file_name}"')
                 packets = []
 
             lap_number = packet.num_laps
@@ -359,11 +368,11 @@ def startF1Server():
         #print(f"{speed}KPH, {last_laps[0]/1000}s, {last_laps[1]/1000}s, {last_laps[2]/1000}s, {last_laps[3]/1000}s, {last_laps[4]/1000}s, {throttle*100:0.0f}%, {brake*100:0.0f}%, {drs}, {loc_x:0.2f}x, {loc_y:0.2f}y")
 
         # Store Session Data so that we can dump it to disk and review later
-        if enable_save_telemetry:
+        if (enable_save_telemetry and lap_time < (TRACK_SETTINGS[track_id]['maxRecordingTime'])):
             packets.append(packet)
 
-        # To save overwhelming the UI while waiting for it to render, only add a message to the queue every "telelmetry_update_interval" miliseconds
-        if last_ui_update < time.time() - (telelmetry_update_interval / 1000):
+        # To save overwhelming the UI while waiting for it to render, only add a message to the queue every "telemetry_update_interval" miliseconds
+        if last_ui_update < time.time() - (telemetry_update_interval / 1000):
             last_ui_update = time.time()
             update = {
                 "session_time": session_time,
